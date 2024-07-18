@@ -3,7 +3,6 @@ import random
 import mysql.connector
 import paho.mqtt.client as mqtt
 import pymongo
-from pymongo import MongoClient
 from neo4j import GraphDatabase
 
 # Sensor Devices MAC Addresses
@@ -30,7 +29,6 @@ def generate_sensor_data():
     motion = random.choice([True, False])
     smoke = round(random.uniform(0.01, 0.03), 10)
     temp = round(random.uniform(15.0, 30.0), 1)
-
     return {
         "ts": ts,
         "device": device,
@@ -83,7 +81,7 @@ def connect_to_mongo():
         print(f"Error: {err}")
         return None
 
-def store_data_mongo(data_list, collection):
+def store_data_mongo(data_list, collection): 
     try:
         collection.insert_many(data_list)
     except pymongo.errors.BulkWriteError as err:
@@ -113,7 +111,6 @@ def store_data_neo4j(driver, data):
             motion = data["motion"]
             smoke = data["smoke"]
             temp = data["temp"]
-
             session.write_transaction(create_sensor_reading, device_mac, ts, co, humidity, light, lpg, motion, smoke, temp)
     except Exception as e:
         print(f"Error: {e}")
@@ -128,7 +125,7 @@ def create_sensor_reading(tx, device_mac, ts, co, humidity, light, lpg, motion, 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Connected to broker")
-        client.subscribe("sensor/data")
+        client.subscribe("#")  # Subscribe to all topics
     else:
         print("Connection failed with code", rc)
 
@@ -141,17 +138,11 @@ def on_message(client, userdata, message):
 def setup_users_devices(mydb):
     try:
         cursor = mydb.cursor()
-        
-        # Create users
         cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(50) NOT NULL UNIQUE, password VARCHAR(255) NOT NULL)")
         cursor.executemany("INSERT IGNORE INTO users (username, password) VALUES (%s, %s)", users)
-        
-        # Create devices
         cursor.execute("CREATE TABLE IF NOT EXISTS devices (device_id INT AUTO_INCREMENT PRIMARY KEY, device_mac VARCHAR(17) NOT NULL UNIQUE, user_id INT, FOREIGN KEY (user_id) REFERENCES users(user_id))")
         for device in devices:
             cursor.execute("INSERT IGNORE INTO devices (device_mac, user_id) VALUES (%s, (SELECT user_id FROM users ORDER BY RAND() LIMIT 1))", (device,))
-        
-        # Create sensor_readings table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS sensor_readings (
             reading_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -167,10 +158,15 @@ def setup_users_devices(mydb):
             FOREIGN KEY (device_id) REFERENCES devices(device_id)
         )
         """)
-        
         mydb.commit()
     except mysql.connector.Error as err:
         print(f"Error: {err}")
+
+def subscribe_to_topics(client):
+    client.subscribe("#")  # Subscribe to all topics
+
+def publish_message(client, topic, message):
+    client.publish(topic, message)
 
 def main():
     broker_address = "76fe501d8d0e4dc3a8c6c8035fdc9ff0.s1.eu.hivemq.cloud"
@@ -188,13 +184,9 @@ def main():
         if mydb is None:
             return
         setup_users_devices(mydb)
-        
         mycursor = mydb.cursor()
         mongo_collection = connect_to_mongo()
-        
-        
         neo4j_driver = connect_to_neo4j()
-
 
         client.connect(broker_address, broker_port)
         client.loop_start()
@@ -205,6 +197,15 @@ def main():
             data_list.append(data)
             store_data_mysql(data, mycursor, mydb)
             store_data_neo4j(neo4j_driver, data)
+
+            publish_message(client, "sensor/temp", str(data["temp"]))
+            publish_message(client, "sensor/co", str(data["co"]))
+            publish_message(client, "sensor/humidity", str(data["humidity"]))
+            publish_message(client, "sensor/light", str(data["light"]))
+            publish_message(client, "sensor/lpg", str(data["lpg"]))
+            publish_message(client, "sensor/motion", str(data["motion"]))
+            publish_message(client, "sensor/smoke", str(data["smoke"]))
+
             time.sleep(2)
     except KeyboardInterrupt:
         print("Stopping...")
@@ -216,12 +217,8 @@ def main():
         if mydb:
             mydb.close()
         print("MySQL connection closed")
-
-        
         store_data_mongo(data_list, mongo_collection)
         print("MongoDB connection closed")
-        
-        
         neo4j_driver.close()
         print("Neo4j connection closed")
 
